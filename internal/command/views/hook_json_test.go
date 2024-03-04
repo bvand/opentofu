@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+
 	"github.com/opentofu/opentofu/internal/addrs"
 	"github.com/opentofu/opentofu/internal/plans"
 	"github.com/opentofu/opentofu/internal/states"
@@ -60,21 +62,25 @@ func TestJSONHook_create(t *testing.T) {
 	action, err = hook.PostProvisionInstanceStep(addr, "local-exec", nil)
 	testHookReturnValues(t, action, err)
 
-	// Travel 10s into the future, notify the progress goroutine, and sleep
-	// briefly to allow it to execute
-	nowMu.Lock()
-	now = now.Add(10 * time.Second)
-	after <- now
-	nowMu.Unlock()
-	time.Sleep(1 * time.Millisecond)
+	elapsedChan := hook.applying[addr.String()].elapsed
 
-	// Travel 10s into the future, notify the progress goroutine, and sleep
-	// briefly to allow it to execute
+	// Travel 10s into the future, notify the progress goroutine, and wait
+	// for execution via 'elapsed' progress
 	nowMu.Lock()
 	now = now.Add(10 * time.Second)
 	after <- now
 	nowMu.Unlock()
-	time.Sleep(1 * time.Millisecond)
+	elapsed := <-elapsedChan
+	testDurationEqual(t, 10*time.Second, elapsed)
+
+	// Travel 10s into the future, notify the progress goroutine, and wait
+	// for execution via 'elapsed' progress
+	nowMu.Lock()
+	now = now.Add(10 * time.Second)
+	after <- now
+	nowMu.Unlock()
+	elapsed = <-elapsedChan
+	testDurationEqual(t, 20*time.Second, elapsed)
 
 	// Travel 2s into the future. We have arrived!
 	nowMu.Lock()
@@ -88,6 +94,7 @@ func TestJSONHook_create(t *testing.T) {
 	hook.applyingLock.Lock()
 	for key, progress := range hook.applying {
 		close(progress.done)
+		close(progress.elapsed)
 		<-progress.heartbeatDone
 		delete(hook.applying, key)
 	}
@@ -219,6 +226,7 @@ func TestJSONHook_errors(t *testing.T) {
 	hook.applyingLock.Lock()
 	for key, progress := range hook.applying {
 		close(progress.done)
+		close(progress.elapsed)
 		<-progress.heartbeatDone
 		delete(hook.applying, key)
 	}
@@ -337,5 +345,13 @@ func testHookReturnValues(t *testing.T, action tofu.HookAction, err error) {
 	}
 	if action != tofu.HookActionContinue {
 		t.Fatalf("Expected hook to continue, given: %#v", action)
+	}
+}
+
+func testDurationEqual(t *testing.T, wantedDuration time.Duration, gotDuration time.Duration) {
+	t.Helper()
+
+	if !cmp.Equal(wantedDuration, gotDuration) {
+		t.Errorf("unexpected time elapsed:%s\n", cmp.Diff(wantedDuration, gotDuration))
 	}
 }
